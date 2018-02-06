@@ -26,7 +26,7 @@
                          $"{(int)Operations.Receive}: { Operations.Receive}\n" +
                          $"{(int)Operations.Send}: { Operations.Send}\n" +
                          $"{(int)Operations.Exit}: {Operations.Exit}\n" +
-                         "-----------------------"
+                         "---------------------"
             );
 
             return menu;

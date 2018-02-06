@@ -1,8 +1,12 @@
 ﻿using System;
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using CryptoWallet.Interfaces;
 using HBitcoin.KeyManagement;
 using NBitcoin;
+using QBitNinja.Client;
+using QBitNinja.Client.Models;
 
 namespace CryptoWallet.Core
 {
@@ -31,16 +35,16 @@ namespace CryptoWallet.Core
                     this.RecoverCommand();
                     break;
                 case (int)WalletOperations.Operations.Balance:
-                    this.GetBalance();
+                    this.GetBalanceCommand();
                     break;
                 case (int)WalletOperations.Operations.History:
-                    this.ShowHistory();
+                    this.ShowHistoryCommand();
                     break;
                 case (int)WalletOperations.Operations.Receive:
                     this.ReceiveCommand();
                     break;
                 case (int)WalletOperations.Operations.Send:
-                    this.Send();
+                    this.SendCommand();
                     break;
                 case (int)WalletOperations.Operations.Exit:
                     this.writer.WriteLine("See ya :))");
@@ -94,7 +98,7 @@ namespace CryptoWallet.Core
 
                     Mnemonic mnemonic;
                     string fileName = walletFilePath + walletName + ".json";
-                    Safe safe = Safe.Create(out mnemonic, password, fileName, this.currentNetwork);
+                    Safe wallet = Safe.Create(out mnemonic, password, fileName, this.currentNetwork);
                     Console.WriteLine();
                     this.WriteLineCommand("Wallet created successfully");
                     this.WriteLineCommand("Write down the following mnemonic words.");
@@ -109,8 +113,8 @@ namespace CryptoWallet.Core
                     const int firstTenAddressesInWallet = 10;
                     for (int i = 0; i < firstTenAddressesInWallet; i++)
                     {
-                        this.WriteLineCommand($"Address: {safe.GetAddress(i)} -> Private key: " +
-                                              $"{safe.FindPrivateKey(safe.GetAddress(i))}");
+                        this.WriteLineCommand($"Address: {wallet.GetAddress(i)} -> Private key: " +
+                                              $"{wallet.FindPrivateKey(wallet.GetAddress(i))}");
                     }
 
                     failure = false;
@@ -124,14 +128,188 @@ namespace CryptoWallet.Core
             }
         }
 
-        private void GetBalance()
+        private void GetBalanceCommand()
         {
-            throw new System.NotImplementedException();
+            this.WriteCommand("Enter wallet's name: ");
+            string walletName = this.ReadLineCommand();
+
+            this.WriteCommand("Enter password: ");
+            string password = this.ReadLineCommand();
+
+            this.WriteCommand("Enter wallet address: ");
+            string walletAddress = this.ReadLineCommand();
+
+            this.GetBalance(password, walletName, walletAddress);
         }
 
-        private void Send()
+        private void GetBalance(string password, string walletName, string walletAddress)
         {
-            throw new System.NotImplementedException();
+            try
+            {
+                Safe wallet = Safe.Load(password, this.walletFilePath + walletName + ".json");
+            }
+            catch
+            {
+                this.WriteLineCommand("");
+                this.WriteLineCommand("Wrong wallet or password");
+                this.WriteLineCommand("");
+            }
+
+            QBitNinjaClient client = new QBitNinjaClient(this.currentNetwork);
+
+            decimal totalBalance = 0;
+            var balance = client.GetBalance(BitcoinAddress.Create(walletAddress), true).Result;
+
+            foreach (var entry in balance.Operations)
+            {
+                foreach (var coin in entry.ReceivedCoins)
+                {
+                    Money amount = (Money)coin.Amount;
+                    decimal currentAmount = amount.ToDecimal(MoneyUnit.BTC);
+                    totalBalance += currentAmount;
+                }
+            }
+
+            this.WriteLineCommand("---------------------");
+            this.WriteLineCommand($"Balance of wallet: {totalBalance}");
+            this.WriteLineCommand("---------------------");
+            this.WriteLineCommand("");
+        }
+
+        private void SendCommand()
+        {
+            this.WriteCommand("Enter wallet's name: ");
+            string walletName = this.ReadLineCommand();
+
+            this.WriteCommand("Enter wallet's password: ");
+            string password = this.ReadLineCommand();
+
+            this.WriteCommand("Enter wallet address: ");
+            string walletAddress = this.ReadLineCommand();
+
+            this.WriteCommand("Select outpoint (transaction ID): ");
+            string outpoint = this.ReadLineCommand();
+
+            this.Send(password, walletName, walletAddress, outpoint);
+        }
+
+        private void Send(string password, string walletName, string walletAddress, string outpoint)
+        {
+            BitcoinExtKey privateKey = null;
+
+            try
+            {
+                Safe wallet = Safe.Load(password, this.walletFilePath + walletName + ".json");
+
+                const int firstTenAddressesInWallet = 10;
+                for (int i = 0; i < firstTenAddressesInWallet; i++)
+                {
+                    if (wallet.GetAddress(i).ToString() == walletAddress)
+                    {
+                        this.WriteLineCommand("");
+                        this.WriteCommand("Enter private key: ");
+                        privateKey = new BitcoinExtKey(this.ReadLineCommand());
+
+                        if (!privateKey.Equals(wallet.FindPrivateKey(wallet.GetAddress(i))))
+                        {
+                            this.WriteLineCommand("");
+                            this.WriteLineCommand("Wrong private key!");
+                            this.WriteLineCommand("");
+                        }
+
+                        break;
+                    }
+                }
+            }
+            catch
+            {
+                this.WriteLineCommand("");
+                this.WriteLineCommand("Wrong wallet or password");
+                this.WriteLineCommand("");
+            }
+
+            QBitNinjaClient client = new QBitNinjaClient(this.currentNetwork);
+            var balance = client.GetBalance(BitcoinAddress.Create(walletAddress), false).Result;
+            OutPoint outpointToSpend = null;
+
+            //outpoint = transaction ID
+            foreach (var entry in balance.Operations)
+            {
+                foreach (var coin in entry.ReceivedCoins)
+                {
+                    if (coin.Outpoint.ToString().Substring(0, coin.Outpoint.ToString().Length - 2) == outpoint)
+                    {
+                        outpointToSpend = coin.Outpoint;
+                        break;
+                    }
+                }
+            }
+
+            this.MakeTransaction(outpointToSpend, privateKey, client);
+        }
+
+        private void MakeTransaction(OutPoint outpointToSpend, BitcoinExtKey privateKey, QBitNinjaClient client)
+        {
+            var transaction = new Transaction();
+
+            transaction.Inputs.Add(new TxIn()
+            {
+                PrevOut = outpointToSpend
+            });
+
+            this.WriteCommand("Enter address to send to: ");
+            string recieverAddress = this.ReadLineCommand();
+
+            var hallOfTheMakersAddress = BitcoinAddress.Create(recieverAddress);
+
+            this.WriteCommand("Enter amount to send: ");
+            decimal amountToSend = decimal.Parse(this.ReadLineCommand());
+
+            TxOut hallOfTheMakersTxOut = new TxOut()
+            {
+                Value = new Money(amountToSend, MoneyUnit.BTC),
+                ScriptPubKey = hallOfTheMakersAddress.ScriptPubKey
+            };
+
+            this.WriteCommand("Enter amount the get back: ");
+            decimal amountToGetBack = decimal.Parse(this.ReadLineCommand());
+
+            TxOut changeBackTxOut = new TxOut()
+            {
+                Value = new Money(amountToGetBack, MoneyUnit.BTC),
+                ScriptPubKey = privateKey.ScriptPubKey
+            };
+
+            transaction.Outputs.Add(hallOfTheMakersTxOut);
+            transaction.Outputs.Add(changeBackTxOut);
+
+            this.WriteCommand("Enter message: ");
+            string message = this.ReadLineCommand();
+            var bytes = Encoding.UTF8.GetBytes(message);
+
+            transaction.Outputs.Add(new TxOut()
+            {
+                Value = Money.Zero,
+                ScriptPubKey = TxNullDataTemplate.Instance.GenerateScriptPubKey(bytes)
+            });
+
+            transaction.Inputs[0].ScriptSig = privateKey.ScriptPubKey;
+            transaction.Sign(privateKey, false);
+
+            BroadcastResponse broadcastResponse = client.Broadcast(transaction).Result;
+
+            if (broadcastResponse.Success)
+            {
+                this.WriteLineCommand("");
+                this.WriteLineCommand("Transaction Send!");
+                this.WriteLineCommand("");
+            }
+            else
+            {
+                this.WriteLineCommand("");
+                this.WriteLineCommand("Something went wrong! :'(");
+                this.WriteLineCommand("");
+            }
         }
 
         private void ReceiveCommand()
@@ -149,12 +327,12 @@ namespace CryptoWallet.Core
         {
             try
             {
-                Safe loadedSafe = Safe.Load(password, this.walletFilePath + walletName + ".json");
+                Safe wallet = Safe.Load(password, this.walletFilePath + walletName + ".json");
 
                 const int firstTenAddressesInWallet = 10;
                 for (int i = 0; i < firstTenAddressesInWallet; i++)
                 {
-                    this.WriteLineCommand($"{i + 1}: " + loadedSafe.GetAddress(i));
+                    this.WriteLineCommand($"{i + 1}: " + wallet.GetAddress(i));
                 }
             }
             catch (Exception)
@@ -165,9 +343,67 @@ namespace CryptoWallet.Core
             }
         }
 
-        private void ShowHistory()
+        private void ShowHistoryCommand()
         {
-            throw new System.NotImplementedException();
+            this.WriteCommand("Enter wallet's name: ");
+            string walletName = this.ReadLineCommand();
+
+            this.WriteCommand("Enter password: ");
+            string password = this.ReadLineCommand();
+
+            this.WriteCommand("Enter wallet address: ");
+            string walletAddress = this.ReadLineCommand();
+
+            this.ShowHistory(password, walletName, walletAddress);
+        }
+
+        private void ShowHistory(string password, string walletName, string walletAddress)
+        {
+            try
+            {
+                Safe wallet = Safe.Load(password, this.walletFilePath + walletName + ".json");
+            }
+            catch
+            {
+                this.WriteLineCommand("");
+                this.WriteLineCommand("Wrong wallet or password");
+                this.WriteLineCommand("");
+            }
+
+            QBitNinjaClient client = new QBitNinjaClient(this.currentNetwork);
+
+            var coinsReceived = client.GetBalance(BitcoinAddress.Create(walletAddress), true).Result;
+            string header = "------COINS RECEIVED------";
+            this.WriteLineCommand(header);
+
+            foreach (var entry in coinsReceived.Operations)
+            {
+                foreach (var coin in entry.ReceivedCoins)
+                {
+                    Money amount = (Money)coin.Amount;
+                    this.WriteLineCommand
+                        ($"Transaction ID: {coin.Outpoint}; Received Coins: {amount.ToDecimal(MoneyUnit.BTC)}");
+                }
+            }
+
+            this.WriteLineCommand(new string('-', header.Length));
+
+            var coinsSpent = client.GetBalance(BitcoinAddress.Create(walletAddress), false).Result;
+
+            string footer = "------COINS SPENT------";
+            this.WriteLineCommand(footer);
+
+            foreach (var entry in coinsSpent.Operations)
+            {
+                foreach (var coin in entry.SpentCoins)
+                {
+                    Money amount = (Money)coin.Amount;
+                    this.WriteLineCommand
+                        ($"Transaction ID: {coin.Outpoint}; Spent Coins: {amount.ToDecimal(MoneyUnit.BTC)}");
+                }
+            }
+
+            this.WriteLineCommand(new string('-', footer.Length));
         }
 
         private void RecoverCommand()
@@ -195,7 +431,7 @@ namespace CryptoWallet.Core
         {
             Random random = new Random();
 
-            Safe safe = Safe.Recover(mnem, password,
+            Safe wallet = Safe.Recover(mnem, password,
                 this.walletFilePath + "RecoveredWalletNum" + random.Next() + ".json",
                 this.currentNetwork,
                 DateTimeOffset.ParseExact(date, "yyyy-MM-dd", CultureInfo.InvariantCulture));
